@@ -1,0 +1,242 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #1f2933;
+  background: #f7f8fa;
+}
+
+.popup-page {
+  width: 360px;
+  min-height: 430px;
+}
+
+.popup-shell {
+  padding: 14px;
+}
+
+.popup-header {
+  margin-bottom: 12px;
+}
+
+.popup-header h1 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.muted {
+  margin: 0;
+  color: #65758b;
+  font-size: 12px;
+}
+
+.panel {
+  margin-bottom: 12px;
+}
+
+label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.panel-heading label {
+  margin: 0;
+}
+
+.panel-heading small {
+  color: #65758b;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+input,
+select,
+button {
+  font: inherit;
+}
+
+input[type="password"],
+select {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid #d6dbe3;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #fff;
+  color: #1f2933;
+}
+
+.input-row {
+  display: grid;
+  grid-template-columns: 1fr 72px;
+  gap: 8px;
+}
+
+.checkbox-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.checkbox-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  margin: 0;
+  border: 1px solid #d6dbe3;
+  border-radius: 6px;
+  background: #fff;
+  color: #1f2933;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.checkbox-item input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.checkbox-item:has(input:checked) {
+  border-color: #2364aa;
+  background: #eaf2ff;
+  color: #174f8a;
+}
+
+button {
+  min-height: 36px;
+  border: 0;
+  border-radius: 6px;
+  background: #2364aa;
+  color: #fff;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+button:hover:not(:disabled) {
+  background: #1d5794;
+}
+
+button:disabled {
+  background: #a7b3c3;
+  cursor: not-allowed;
+}
+
+button.secondary {
+  background: #475569;
+}
+
+button.secondary:hover:not(:disabled) {
+  background: #334155;
+}
+
+.switch-panel {
+  border: 1px solid #d6dbe3;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fff;
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+}
+
+.switch-row span {
+  display: grid;
+  gap: 2px;
+}
+
+.switch-row small {
+  color: #65758b;
+  font-weight: 400;
+}
+
+.switch-row input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+
+.button-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.status {
+  min-height: 18px;
+  margin: 0;
+  color: #65758b;
+  font-size: 12px;
+}
+
+.status.ok {
+  color: #0f7a4f;
+}
+
+.status.error {
+  color: #b42318;
+}
+
+.status.loading {
+  color: #2364aa;
+}
+
+.sidebar-page {
+  background: #fff;
+}
+
+.sidebar-shell {
+  padding: 14px;
+}
+
+.sidebar-shell h1 {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+
+.translation-card {
+  display: grid;
+  gap: 10px;
+}
+
+.translation-card h2 {
+  margin: 0 0 4px;
+  color: #526173;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.translation-output {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1px solid #d6dbe3;
+  border-radius: 6px;
+  padding: 10px;
+  background: #f8fafc;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.55;
+}

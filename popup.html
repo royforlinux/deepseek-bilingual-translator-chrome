@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>DeepSeek Translator</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="popup-page">
+  <main class="popup-shell">
+    <header class="popup-header">
+      <h1>DeepSeek 翻译</h1>
+      <p id="current-site" class="muted">读取当前页面...</p>
+    </header>
+
+    <section class="panel">
+      <label for="api-key">API Key</label>
+      <div class="input-row">
+        <input type="password" id="api-key" autocomplete="off" placeholder="sk-...">
+        <button id="save-key" type="button">保存</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <label for="target-language">目标语言</label>
+      <select id="target-language"></select>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <label>原文语言自动翻译</label>
+        <small id="detected-language">当前页：识别中</small>
+      </div>
+      <div id="source-language-list" class="checkbox-grid"></div>
+    </section>
+
+    <section class="panel switch-panel">
+      <label class="switch-row" for="auto-translate">
+        <span>
+          <strong>本站始终自动翻译</strong>
+          <small>按网站记忆</small>
+        </span>
+        <input type="checkbox" id="auto-translate">
+      </label>
+    </section>
+
+    <section class="button-grid">
+      <button id="translate-page" type="button">翻译当前页</button>
+      <button id="restore-page" type="button" class="secondary">恢复原文</button>
+    </section>
+
+    <p id="status" class="status" role="status"></p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>
