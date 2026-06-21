@@ -1,5 +1,5 @@
 (() => {
-  const CONTENT_SCRIPT_VERSION = "1.2.0";
+  const CONTENT_SCRIPT_VERSION = "1.3.0";
   if (window.__mlawDeepSeekTranslatorLoaded === CONTENT_SCRIPT_VERSION) {
     return;
   }
@@ -17,8 +17,28 @@
   const TRANSLATED_CLASS = "mlaw-translated-block";
   const NOTICE_ID = "mlaw-translate-notice";
   const STYLE_ID = "mlaw-translate-style";
+  const YOUTUBE_CAPTION_OVERLAY_ID = "mlaw-youtube-caption-overlay";
+  const YOUTUBE_CAPTION_DEBOUNCE_MS = 350;
   const BASIC_SELECTOR = "p, li, h1, h2, h3, h4, h5, h6, blockquote, figcaption, td, th";
   const CANDIDATE_SELECTOR = `${BASIC_SELECTOR}, article, section`;
+  const YOUTUBE_TEXT_SELECTOR = [
+    "ytd-watch-metadata #title h1",
+    "ytd-watch-metadata #description-inline-expander yt-attributed-string",
+    "ytd-watch-metadata ytd-text-inline-expander yt-attributed-string",
+    "ytd-comment-thread-renderer #content-text",
+    "ytd-comment-view-model #content-text"
+  ].join(",");
+  const YOUTUBE_DYNAMIC_SELECTOR = [
+    "ytd-watch-metadata",
+    "ytd-comments",
+    "ytd-comment-thread-renderer",
+    "ytd-comment-view-model"
+  ].join(",");
+  const YOUTUBE_CAPTION_SELECTOR = [
+    ".ytp-caption-segment",
+    ".ytp-caption-window-container",
+    ".caption-window"
+  ].join(",");
   const EXCLUDED_SELECTOR = [
     "script",
     "style",
@@ -49,7 +69,8 @@
     "[role='contentinfo']",
     "[aria-hidden='true']",
     `.${TRANSLATED_CLASS}`,
-    `#${NOTICE_ID}`
+    `#${NOTICE_ID}`,
+    `#${YOUTUBE_CAPTION_OVERLAY_ID}`
   ].join(",");
   const CONTENT_ROOT_SELECTOR = [
     "main",
@@ -75,7 +96,16 @@
     translating: false,
     hasTranslated: false,
     observer: null,
-    observerTimer: null
+    observerTimer: null,
+    youtubeCaptionsEnabled: false,
+    youtubeCaptionObserver: null,
+    youtubeCaptionTimer: null,
+    youtubeCaptionLastText: "",
+    youtubeCaptionLastTranslation: "",
+    youtubeCaptionRequestId: 0,
+    youtubeCaptionHasTranslated: false,
+    youtubeCaptionLastErrorAt: 0,
+    lastUrl: location.href
   };
 
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -96,6 +126,7 @@
     injectStyles();
     startObserver();
     await loadSettings();
+    syncYouTubeCaptionTranslation();
 
     if (state.autoTranslate) {
       setTimeout(() => {
@@ -114,7 +145,8 @@
     const data = await storageSyncGet({
       targetLanguage: DEFAULT_TARGET_LANGUAGE,
       siteRules: {},
-      autoSourceLanguages: []
+      autoSourceLanguages: [],
+      youtubeCaptionsEnabled: false
     });
 
     const siteKey = getSiteKey();
@@ -128,6 +160,7 @@
       state.targetLanguage
     );
     state.autoTranslate = state.siteAutoTranslate || state.autoTranslateBySource;
+    state.youtubeCaptionsEnabled = Boolean(data.youtubeCaptionsEnabled);
   }
 
   async function handleMessage(request) {
@@ -148,6 +181,18 @@
       return { success: true, count: 0 };
     }
 
+    if (request.action === "setYouTubeCaptions") {
+      await loadSettings();
+      state.youtubeCaptionsEnabled = Boolean(request.enabled);
+      state.targetLanguage = request.targetLanguage || state.targetLanguage;
+      syncYouTubeCaptionTranslation({ notify: true });
+      return {
+        success: true,
+        enabled: state.youtubeCaptionsEnabled && isYouTubeWatchPage(),
+        isYouTubeWatchPage: isYouTubeWatchPage()
+      };
+    }
+
     if (request.action === "getPageState") {
       await loadSettings();
       return {
@@ -160,7 +205,10 @@
         autoSourceLanguages: state.autoSourceLanguages,
         detectedSourceLanguage: state.detectedSourceLanguage,
         targetLanguage: state.targetLanguage,
-        translatedCount: document.querySelectorAll(`.${TRANSLATED_CLASS}`).length
+        translatedCount: getTranslatedCount(),
+        isYouTubeWatchPage: isYouTubeWatchPage(),
+        youtubeCaptionsEnabled: state.youtubeCaptionsEnabled,
+        youtubeCaptionsActive: Boolean(state.youtubeCaptionObserver)
       };
     }
 
@@ -176,11 +224,13 @@
     state.targetLanguage = targetLanguage || DEFAULT_TARGET_LANGUAGE;
 
     if (forceRetranslate && !incremental) {
-      restorePage({ silent: true });
+      restorePage({ silent: true, keepYouTubeCaptionSetting: true });
     }
+    syncYouTubeCaptionTranslation();
 
     const { blocks, truncated } = collectTextBlocks();
     if (!blocks.length) {
+      syncYouTubeCaptionTranslation();
       showNotice("没有新的可翻译内容", "info", 2500);
       return { success: true, count: 0, truncated };
     }
@@ -206,6 +256,7 @@
 
       const truncationText = truncated ? "，页面较长已截断" : "";
       showNotice(`已翻译 ${inserted} 段${truncationText}`, "ok", 3500);
+      syncYouTubeCaptionTranslation();
       return { success: true, count: inserted, truncated };
     } finally {
       state.translating = false;
@@ -319,7 +370,28 @@
       }
     }
 
+    if (isYouTubeWatchPage()) {
+      for (const element of getYouTubeCandidateElements()) {
+        elementMap.set(element, element);
+      }
+    }
+
     return Array.from(elementMap.values()).sort(compareElementPriority);
+  }
+
+  function getYouTubeCandidateElements() {
+    return Array.from(document.querySelectorAll(YOUTUBE_TEXT_SELECTOR))
+      .filter((element) => element instanceof HTMLElement)
+      .filter((element) => !isNestedYouTubeCandidate(element));
+  }
+
+  function isNestedYouTubeCandidate(element) {
+    if (element.matches("ytd-watch-metadata #title h1")) {
+      return false;
+    }
+
+    const title = element.closest("ytd-watch-metadata #title h1");
+    return Boolean(title);
   }
 
   function getContentRoots() {
@@ -372,6 +444,10 @@
 
     if (element.closest("main, article, [role='main'], shreddit-post, shreddit-comment")) {
       score += 20;
+    }
+
+    if (element.closest("ytd-watch-metadata, ytd-comments")) {
+      score += 30;
     }
 
     return score;
@@ -459,6 +535,13 @@
   }
 
   function detectPageLanguage() {
+    if (isYouTubeWatchPage()) {
+      const youtubeLanguage = detectLanguageFromText(getPageTextSample());
+      if (youtubeLanguage !== "unknown") {
+        return youtubeLanguage;
+      }
+    }
+
     const metadataLanguage = detectLanguageFromMetadata();
     if (metadataLanguage !== "unknown") {
       return metadataLanguage;
@@ -505,6 +588,10 @@
 
   function getPageTextSample() {
     const elements = Array.from(document.querySelectorAll(CANDIDATE_SELECTOR));
+    if (isYouTubeWatchPage()) {
+      elements.push(...getYouTubeCandidateElements());
+    }
+
     const parts = [document.title || ""];
     let totalLength = parts[0].length;
 
@@ -635,8 +722,9 @@
   }
 
   function createTranslationNode(source, translation) {
-    const shouldNestInsideSource = source.matches("li, td, th");
-    const tagName = shouldNestInsideSource ? "div" : source.tagName.toLowerCase();
+    const isYouTubeTranslation = isYouTubeTextElement(source);
+    const shouldNestInsideSource = !isYouTubeTranslation && source.matches("li, td, th");
+    const tagName = shouldNestInsideSource || isYouTubeTranslation ? "div" : source.tagName.toLowerCase();
     const translatedNode = document.createElement(tagName);
 
     translatedNode.className = buildTranslationClassName(source, shouldNestInsideSource);
@@ -644,24 +732,29 @@
     translatedNode.setAttribute("lang", state.targetLanguage);
     translatedNode.textContent = translation;
 
-    if (!shouldNestInsideSource) {
+    if (!shouldNestInsideSource && !isYouTubeTranslation) {
       copyLayoutAttributes(source, translatedNode);
     }
 
-    copyComputedTextLayout(source, translatedNode, shouldNestInsideSource);
+    copyComputedTextLayout(source, translatedNode, shouldNestInsideSource || isYouTubeTranslation);
     return translatedNode;
   }
 
   function buildTranslationClassName(source, isNested) {
     const classes = new Set();
-    for (const className of source.classList || []) {
-      if (className !== TRANSLATED_CLASS) {
-        classes.add(className);
+    if (!isYouTubeTextElement(source)) {
+      for (const className of source.classList || []) {
+        if (className !== TRANSLATED_CLASS) {
+          classes.add(className);
+        }
       }
     }
     classes.add(TRANSLATED_CLASS);
     if (isNested) {
       classes.add("mlaw-translated-inline-block");
+    }
+    if (isYouTubeTextElement(source)) {
+      classes.add("mlaw-youtube-translation");
     }
     return Array.from(classes).join(" ");
   }
@@ -734,9 +827,10 @@
       node.removeAttribute(SOURCE_ID_ATTR);
       node.removeAttribute(TRANSLATED_ATTR);
     });
+    stopYouTubeCaptionTranslation({ keepSetting: Boolean(options.keepYouTubeCaptionSetting) });
 
     state.hasTranslated = false;
-    updateTranslatedBadge(false);
+    refreshTranslatedBadge();
 
     if (!options.silent) {
       showNotice("已恢复原文", "ok", 2500);
@@ -749,7 +843,17 @@
     }
 
     state.observer = new MutationObserver((mutations) => {
-      if (!state.autoTranslate || !state.hasTranslated || state.translating) {
+      if (handleUrlChangeIfNeeded()) {
+        return;
+      }
+
+      if (state.translating) {
+        return;
+      }
+
+      const shouldTranslateDynamicContent = state.autoTranslate ||
+        (isYouTubeWatchPage() && state.hasTranslated);
+      if (!shouldTranslateDynamicContent) {
         return;
       }
 
@@ -758,8 +862,7 @@
           if (!(node instanceof HTMLElement)) {
             return false;
           }
-          return !node.closest(`.${TRANSLATED_CLASS}, #${NOTICE_ID}`) &&
-            Boolean(node.innerText || node.textContent);
+          return hasTranslatableAddedNode(node, shouldTranslateDynamicContent);
         });
       });
 
@@ -784,6 +887,245 @@
     });
   }
 
+  function hasTranslatableAddedNode(node) {
+    if (node.closest?.(`.${TRANSLATED_CLASS}, #${NOTICE_ID}, #${YOUTUBE_CAPTION_OVERLAY_ID}`)) {
+      return false;
+    }
+
+    if (node.matches?.(YOUTUBE_CAPTION_SELECTOR) ||
+        node.closest?.(YOUTUBE_CAPTION_SELECTOR) ||
+        node.querySelector?.(YOUTUBE_CAPTION_SELECTOR)) {
+      return false;
+    }
+
+    if (isYouTubeWatchPage() && state.hasTranslated) {
+      return node.matches?.(YOUTUBE_DYNAMIC_SELECTOR) ||
+        node.matches?.(YOUTUBE_TEXT_SELECTOR) ||
+        Boolean(node.querySelector?.(`${YOUTUBE_DYNAMIC_SELECTOR}, ${YOUTUBE_TEXT_SELECTOR}`));
+    }
+
+    return state.autoTranslate && Boolean(node.innerText || node.textContent);
+  }
+
+  function handleUrlChangeIfNeeded() {
+    if (location.href === state.lastUrl) {
+      return false;
+    }
+
+    state.lastUrl = location.href;
+    restorePage({ silent: true, keepYouTubeCaptionSetting: true });
+    loadSettings()
+      .then(() => {
+        syncYouTubeCaptionTranslation();
+        if (state.autoTranslate) {
+          setTimeout(() => {
+            translatePage({
+              targetLanguage: state.targetLanguage,
+              forceRetranslate: true
+            }).catch((error) => {
+              console.error("页面跳转后自动翻译失败：", error);
+            });
+          }, 500);
+        }
+      })
+      .catch((error) => {
+        console.error("页面跳转后读取设置失败：", error);
+      });
+    return true;
+  }
+
+  function syncYouTubeCaptionTranslation(options = {}) {
+    if (state.youtubeCaptionsEnabled && isYouTubeWatchPage()) {
+      startYouTubeCaptionTranslation(options);
+      return;
+    }
+
+    stopYouTubeCaptionTranslation();
+  }
+
+  function startYouTubeCaptionTranslation(options = {}) {
+    if (!document.body || state.youtubeCaptionObserver) {
+      scheduleYouTubeCaptionTranslation(80);
+      return;
+    }
+
+    state.youtubeCaptionObserver = new MutationObserver((mutations) => {
+      const hasCaptionChange = mutations.some((mutation) => {
+        const target = mutation.target;
+        if (target instanceof HTMLElement && target.closest(YOUTUBE_CAPTION_SELECTOR)) {
+          return true;
+        }
+        if (target instanceof Text && target.parentElement?.closest(YOUTUBE_CAPTION_SELECTOR)) {
+          return true;
+        }
+        return Array.from(mutation.addedNodes).some((node) => {
+          if (!(node instanceof HTMLElement)) {
+            return false;
+          }
+          return node.matches(YOUTUBE_CAPTION_SELECTOR) ||
+            Boolean(node.querySelector(YOUTUBE_CAPTION_SELECTOR));
+        });
+      });
+
+      if (hasCaptionChange) {
+        scheduleYouTubeCaptionTranslation();
+      }
+    });
+
+    state.youtubeCaptionObserver.observe(document.body, {
+      childList: true,
+      characterData: true,
+      subtree: true
+    });
+
+    if (options.notify) {
+      showNotice("YouTube 字幕翻译已开启，等待字幕内容", "ok", 2500);
+    }
+    scheduleYouTubeCaptionTranslation(80);
+  }
+
+  function stopYouTubeCaptionTranslation() {
+    clearTimeout(state.youtubeCaptionTimer);
+    state.youtubeCaptionTimer = null;
+
+    if (state.youtubeCaptionObserver) {
+      state.youtubeCaptionObserver.disconnect();
+      state.youtubeCaptionObserver = null;
+    }
+
+    const overlay = document.getElementById(YOUTUBE_CAPTION_OVERLAY_ID);
+    if (overlay) {
+      overlay.remove();
+    }
+
+    state.youtubeCaptionLastText = "";
+    state.youtubeCaptionLastTranslation = "";
+    state.youtubeCaptionRequestId += 1;
+    state.youtubeCaptionHasTranslated = false;
+    refreshTranslatedBadge();
+  }
+
+  function scheduleYouTubeCaptionTranslation(delay = YOUTUBE_CAPTION_DEBOUNCE_MS) {
+    clearTimeout(state.youtubeCaptionTimer);
+    state.youtubeCaptionTimer = setTimeout(() => {
+      translateCurrentYouTubeCaption().catch((error) => {
+        console.error("YouTube 字幕翻译失败：", error);
+      });
+    }, delay);
+  }
+
+  async function translateCurrentYouTubeCaption() {
+    if (!state.youtubeCaptionsEnabled || !isYouTubeWatchPage()) {
+      return;
+    }
+
+    const text = getCurrentYouTubeCaptionText();
+    if (!text) {
+      hideYouTubeCaptionOverlay();
+      return;
+    }
+
+    if (text === state.youtubeCaptionLastText && state.youtubeCaptionLastTranslation) {
+      renderYouTubeCaptionOverlay(state.youtubeCaptionLastTranslation);
+      return;
+    }
+
+    const requestId = state.youtubeCaptionRequestId + 1;
+    state.youtubeCaptionRequestId = requestId;
+    state.youtubeCaptionLastText = text;
+
+    try {
+      const response = await sendRuntimeMessage({
+        action: "translateText",
+        targetLanguage: state.targetLanguage,
+        text
+      });
+
+      if (requestId !== state.youtubeCaptionRequestId) {
+        return;
+      }
+
+      if (!response?.success || !response.translation) {
+        throw new Error(response?.error || "字幕翻译失败");
+      }
+
+      state.youtubeCaptionLastTranslation = response.translation.trim();
+      state.youtubeCaptionHasTranslated = true;
+      renderYouTubeCaptionOverlay(state.youtubeCaptionLastTranslation);
+      refreshTranslatedBadge();
+    } catch (error) {
+      const now = Date.now();
+      if (now - state.youtubeCaptionLastErrorAt > 5000) {
+        state.youtubeCaptionLastErrorAt = now;
+        showNotice(error.message || "YouTube 字幕翻译失败", "error", 3500);
+      }
+    }
+  }
+
+  function getCurrentYouTubeCaptionText() {
+    const segments = Array.from(document.querySelectorAll(".ytp-caption-segment"))
+      .map((element) => normalizeText(element.innerText || element.textContent || ""))
+      .filter(Boolean);
+    return normalizeText(segments.join(" "));
+  }
+
+  function renderYouTubeCaptionOverlay(translation) {
+    if (!translation) {
+      hideYouTubeCaptionOverlay();
+      return;
+    }
+
+    let overlay = document.getElementById(YOUTUBE_CAPTION_OVERLAY_ID);
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.id = YOUTUBE_CAPTION_OVERLAY_ID;
+      overlay.setAttribute("lang", state.targetLanguage);
+      document.documentElement.appendChild(overlay);
+    }
+
+    overlay.textContent = translation;
+    overlay.style.display = "block";
+  }
+
+  function hideYouTubeCaptionOverlay() {
+    const overlay = document.getElementById(YOUTUBE_CAPTION_OVERLAY_ID);
+    if (overlay) {
+      overlay.textContent = "";
+      overlay.style.display = "none";
+    }
+  }
+
+  function refreshTranslatedBadge() {
+    state.hasTranslated = document.querySelectorAll(`.${TRANSLATED_CLASS}`).length > 0;
+    updateTranslatedBadge(getTranslatedCount() > 0);
+  }
+
+  function getTranslatedCount() {
+    const pageTranslations = document.querySelectorAll(`.${TRANSLATED_CLASS}`).length;
+    const captionOverlay = document.getElementById(YOUTUBE_CAPTION_OVERLAY_ID);
+    const hasCaptionTranslation = Boolean(
+      state.youtubeCaptionHasTranslated &&
+      captionOverlay &&
+      normalizeText(captionOverlay.textContent || "")
+    );
+    return pageTranslations + (hasCaptionTranslation ? 1 : 0);
+  }
+
+  function isYouTubeWatchPage() {
+    const host = location.hostname.toLowerCase();
+    const isYouTubeHost = host === "youtube.com" ||
+      host === "www.youtube.com" ||
+      host === "m.youtube.com";
+    return isYouTubeHost && location.pathname === "/watch";
+  }
+
+  function isYouTubeTextElement(element) {
+    return isYouTubeWatchPage() && Boolean(
+      element.matches?.(YOUTUBE_TEXT_SELECTOR) ||
+      element.closest?.("ytd-watch-metadata, ytd-comment-thread-renderer, ytd-comment-view-model")
+    );
+  }
+
   function injectStyles() {
     if (document.getElementById(STYLE_ID)) {
       return;
@@ -802,6 +1144,39 @@
 
       .${TRANSLATED_CLASS}.mlaw-translated-inline-block {
         display: block;
+      }
+
+      .${TRANSLATED_CLASS}.mlaw-youtube-translation {
+        display: block;
+        margin-top: 0.35em;
+        opacity: 0.88;
+      }
+
+      #${YOUTUBE_CAPTION_OVERLAY_ID} {
+        position: fixed;
+        z-index: 2147483646;
+        left: 50%;
+        bottom: 7.5vh;
+        transform: translateX(-50%);
+        display: none;
+        max-width: min(86vw, 980px);
+        padding: 5px 10px;
+        border-radius: 4px;
+        background: rgba(0, 0, 0, 0.66);
+        color: #fff;
+        font: 600 22px/1.35 Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+        text-align: center;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+        white-space: pre-wrap;
+        pointer-events: none;
+      }
+
+      @media (max-width: 640px) {
+        #${YOUTUBE_CAPTION_OVERLAY_ID} {
+          bottom: 10vh;
+          max-width: 92vw;
+          font-size: 16px;
+        }
       }
 
       #${NOTICE_ID} {

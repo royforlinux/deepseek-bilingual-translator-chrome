@@ -40,6 +40,7 @@ function bindEvents() {
   document.getElementById("target-language").addEventListener("change", changeTargetLanguage);
   document.getElementById("source-language-list").addEventListener("change", changeAutoSourceLanguages);
   document.getElementById("auto-translate").addEventListener("change", changeAutoTranslate);
+  document.getElementById("youtube-captions").addEventListener("change", changeYouTubeCaptions);
   document.getElementById("translate-page").addEventListener("click", translateCurrentPage);
   document.getElementById("restore-page").addEventListener("click", restoreCurrentPage);
 }
@@ -110,11 +111,13 @@ async function loadSettings() {
   const syncData = await storageSyncGet({
     targetLanguage: DEFAULT_TARGET_LANGUAGE,
     siteRules: {},
-    autoSourceLanguages: []
+    autoSourceLanguages: [],
+    youtubeCaptionsEnabled: false
   });
 
   document.getElementById("target-language").value = syncData.targetLanguage || DEFAULT_TARGET_LANGUAGE;
   setAutoSourceLanguageControls(syncData.autoSourceLanguages || []);
+  document.getElementById("youtube-captions").checked = Boolean(syncData.youtubeCaptionsEnabled);
 
   const siteRule = activeSiteKey ? syncData.siteRules?.[activeSiteKey] : null;
   document.getElementById("auto-translate").checked = Boolean(siteRule?.autoTranslate);
@@ -224,6 +227,30 @@ async function changeAutoTranslate() {
   }
 }
 
+async function changeYouTubeCaptions() {
+  const enabled = document.getElementById("youtube-captions").checked;
+  await storageSyncSet({ youtubeCaptionsEnabled: enabled });
+
+  if (!activeTab || !activeSiteKey || !isYouTubeWatchUrl(activeTab.url)) {
+    setStatus("YouTube 字幕设置已保存", "ok");
+    return;
+  }
+
+  const targetLanguage = document.getElementById("target-language").value;
+  const response = await sendPageCommand({
+    action: "setYouTubeCaptions",
+    enabled,
+    targetLanguage
+  });
+
+  if (response?.success) {
+    setStatus(enabled ? "YouTube 字幕翻译已开启" : "YouTube 字幕翻译已关闭", "ok");
+    return;
+  }
+
+  setStatus(response?.error || "YouTube 字幕设置失败", "error");
+}
+
 async function translateCurrentPage() {
   const targetLanguage = document.getElementById("target-language").value;
   setStatus("正在翻译当前页...", "loading");
@@ -238,6 +265,10 @@ async function translateCurrentPage() {
 async function restoreCurrentPage() {
   setStatus("正在恢复原文...", "loading");
   const response = await sendPageCommand({ action: "restorePage" });
+  if (isYouTubeWatchUrl(activeTab?.url)) {
+    await storageSyncSet({ youtubeCaptionsEnabled: false });
+    document.getElementById("youtube-captions").checked = false;
+  }
   showCommandResult(response, "已恢复原文");
 }
 
@@ -270,7 +301,7 @@ function showCommandResult(response, successMessage) {
 }
 
 function setPageControlsEnabled(enabled) {
-  for (const id of ["auto-translate", "translate-page", "restore-page"]) {
+  for (const id of ["auto-translate", "translate-page", "restore-page", "youtube-captions"]) {
     document.getElementById(id).disabled = !enabled;
   }
 }
@@ -283,8 +314,10 @@ async function refreshPageState() {
 
   const pageState = await getCurrentPageState();
   updateDetectedLanguageLabel(pageState);
+  updateYouTubePanel(pageState);
   if (pageState?.success) {
     document.getElementById("auto-translate").checked = Boolean(pageState.siteAutoTranslate);
+    document.getElementById("youtube-captions").checked = Boolean(pageState.youtubeCaptionsEnabled);
   }
 }
 
@@ -329,6 +362,13 @@ function updateDetectedLanguageLabel(pageState) {
   element.textContent = `当前页：${getSourceLanguageLabel(language)}`;
 }
 
+function updateYouTubePanel(pageState) {
+  const panel = document.getElementById("youtube-panel");
+  const isYouTubePage = Boolean(pageState?.isYouTubeWatchPage) || isYouTubeWatchUrl(activeTab?.url);
+  panel.classList.toggle("hidden", !isYouTubePage);
+  document.getElementById("youtube-captions").disabled = !isYouTubePage;
+}
+
 function getSourceLanguageLabel(languageId) {
   if (languageId === "unknown") {
     return "未知";
@@ -369,6 +409,23 @@ function isSupportedUrl(url) {
   try {
     const parsedUrl = new URL(url);
     return ["http:", "https:", "file:"].includes(parsedUrl.protocol);
+  } catch {
+    return false;
+  }
+}
+
+function isYouTubeWatchUrl(url) {
+  if (!url) {
+    return false;
+  }
+
+  try {
+    const parsedUrl = new URL(url);
+    const host = parsedUrl.hostname.toLowerCase();
+    const isYouTubeHost = host === "youtube.com" ||
+      host === "www.youtube.com" ||
+      host === "m.youtube.com";
+    return isYouTubeHost && parsedUrl.pathname === "/watch";
   } catch {
     return false;
   }

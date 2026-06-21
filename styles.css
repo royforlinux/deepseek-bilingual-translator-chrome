@@ -38,6 +38,10 @@ body {
   margin-bottom: 12px;
 }
 
+.hidden {
+  display: none !important;
+}
+
 label {
   display: block;
   margin-bottom: 6px;
