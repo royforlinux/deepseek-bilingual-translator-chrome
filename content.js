@@ -1,5 +1,5 @@
 (() => {
-  const CONTENT_SCRIPT_VERSION = "1.3.0";
+  const CONTENT_SCRIPT_VERSION = "1.3.1";
   if (window.__mlawDeepSeekTranslatorLoaded === CONTENT_SCRIPT_VERSION) {
     return;
   }
@@ -19,6 +19,7 @@
   const STYLE_ID = "mlaw-translate-style";
   const YOUTUBE_CAPTION_OVERLAY_ID = "mlaw-youtube-caption-overlay";
   const YOUTUBE_CAPTION_DEBOUNCE_MS = 350;
+  const EXTENSION_CONTEXT_INVALIDATED_MESSAGE = "扩展已重新加载，请刷新当前页面后再试";
   const BASIC_SELECTOR = "p, li, h1, h2, h3, h4, h5, h6, blockquote, figcaption, td, th";
   const CANDIDATE_SELECTOR = `${BASIC_SELECTOR}, article, section`;
   const YOUTUBE_TEXT_SELECTOR = [
@@ -105,22 +106,37 @@
     youtubeCaptionRequestId: 0,
     youtubeCaptionHasTranslated: false,
     youtubeCaptionLastErrorAt: 0,
-    lastUrl: location.href
+    lastUrl: location.href,
+    extensionContextInvalidated: false
   };
 
-  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    handleMessage(request)
-      .then((response) => sendResponse(response))
-      .catch((error) => {
-        console.error("页面翻译处理失败：", error);
-        showNotice(error.message || "页面翻译失败", "error", 5000);
-        sendResponse({ success: false, error: error.message || "页面翻译失败" });
-      });
+  if (isExtensionContextAvailable()) {
+    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+      handleMessage(request)
+        .then((response) => sendResponse(response))
+        .catch((error) => {
+          if (isExtensionContextInvalidatedError(error)) {
+            markExtensionContextInvalidated();
+            sendResponse({ success: false, error: EXTENSION_CONTEXT_INVALIDATED_MESSAGE });
+            return;
+          }
 
-    return true;
+          console.error("页面翻译处理失败：", error);
+          showNotice(error.message || "页面翻译失败", "error", 5000);
+          sendResponse({ success: false, error: error.message || "页面翻译失败" });
+        });
+
+      return true;
+    });
+  }
+
+  init().catch((error) => {
+    if (isExtensionContextInvalidatedError(error)) {
+      markExtensionContextInvalidated();
+      return;
+    }
+    console.error("页面翻译初始化失败：", error);
   });
-
-  init();
 
   async function init() {
     injectStyles();
@@ -134,6 +150,10 @@
           targetLanguage: state.targetLanguage,
           forceRetranslate: true
         }).catch((error) => {
+          if (isExtensionContextInvalidatedError(error)) {
+            markExtensionContextInvalidated();
+            return;
+          }
           console.error("自动翻译失败：", error);
           showNotice(error.message || "自动翻译失败", "error", 5000);
         });
@@ -216,6 +236,11 @@
   }
 
   async function translatePage({ targetLanguage, forceRetranslate = false, incremental = false }) {
+    if (state.extensionContextInvalidated || !isExtensionContextAvailable()) {
+      markExtensionContextInvalidated();
+      return { success: false, error: EXTENSION_CONTEXT_INVALIDATED_MESSAGE };
+    }
+
     if (state.translating) {
       return { success: false, error: "页面正在翻译中" };
     }
@@ -876,6 +901,10 @@
           targetLanguage: state.targetLanguage,
           incremental: true
         }).catch((error) => {
+          if (isExtensionContextInvalidatedError(error)) {
+            markExtensionContextInvalidated();
+            return;
+          }
           console.error("增量翻译失败：", error);
         });
       }, 900);
@@ -923,12 +952,20 @@
               targetLanguage: state.targetLanguage,
               forceRetranslate: true
             }).catch((error) => {
+              if (isExtensionContextInvalidatedError(error)) {
+                markExtensionContextInvalidated();
+                return;
+              }
               console.error("页面跳转后自动翻译失败：", error);
             });
           }, 500);
         }
       })
       .catch((error) => {
+        if (isExtensionContextInvalidatedError(error)) {
+          markExtensionContextInvalidated();
+          return;
+        }
         console.error("页面跳转后读取设置失败：", error);
       });
     return true;
@@ -1009,6 +1046,10 @@
     clearTimeout(state.youtubeCaptionTimer);
     state.youtubeCaptionTimer = setTimeout(() => {
       translateCurrentYouTubeCaption().catch((error) => {
+        if (isExtensionContextInvalidatedError(error)) {
+          markExtensionContextInvalidated();
+          return;
+        }
         console.error("YouTube 字幕翻译失败：", error);
       });
     }, delay);
@@ -1244,28 +1285,141 @@
     return location.hostname;
   }
 
+  function markExtensionContextInvalidated() {
+    if (state.extensionContextInvalidated) {
+      return;
+    }
+
+    state.extensionContextInvalidated = true;
+    state.translating = false;
+
+    clearTimeout(state.observerTimer);
+    clearTimeout(state.youtubeCaptionTimer);
+    state.observerTimer = null;
+    state.youtubeCaptionTimer = null;
+
+    if (state.observer) {
+      state.observer.disconnect();
+      state.observer = null;
+    }
+
+    if (state.youtubeCaptionObserver) {
+      state.youtubeCaptionObserver.disconnect();
+      state.youtubeCaptionObserver = null;
+    }
+
+    showNotice(EXTENSION_CONTEXT_INVALIDATED_MESSAGE, "error", 5000);
+  }
+
+  function isExtensionContextAvailable() {
+    try {
+      return !state.extensionContextInvalidated &&
+        typeof chrome === "object" &&
+        Boolean(chrome.runtime?.id) &&
+        typeof chrome.runtime?.sendMessage === "function" &&
+        typeof chrome.storage?.sync?.get === "function";
+    } catch {
+      return false;
+    }
+  }
+
+  function makeExtensionContextInvalidatedError() {
+    const error = new Error(EXTENSION_CONTEXT_INVALIDATED_MESSAGE);
+    error.name = "ExtensionContextInvalidatedError";
+    return error;
+  }
+
+  function isExtensionContextInvalidatedError(error) {
+    const message = String(error?.message || error || "");
+    return error?.name === "ExtensionContextInvalidatedError" ||
+      message.includes("Extension context invalidated") ||
+      message.includes("Extension context was invalidated") ||
+      message.includes(EXTENSION_CONTEXT_INVALIDATED_MESSAGE);
+  }
+
+  function normalizeChromeRuntimeError(error) {
+    if (isExtensionContextInvalidatedError(error)) {
+      return makeExtensionContextInvalidatedError();
+    }
+    return error instanceof Error ? error : new Error(String(error?.message || error || "扩展消息失败"));
+  }
+
   function storageSyncGet(keys) {
-    return new Promise((resolve) => chrome.storage.sync.get(keys, resolve));
+    if (!isExtensionContextAvailable()) {
+      return Promise.reject(makeExtensionContextInvalidatedError());
+    }
+
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.storage.sync.get(keys, (result) => {
+          try {
+            const error = chrome.runtime.lastError;
+            if (error) {
+              reject(normalizeChromeRuntimeError(error));
+              return;
+            }
+            resolve(result || {});
+          } catch (error) {
+            reject(normalizeChromeRuntimeError(error));
+          }
+        });
+      } catch (error) {
+        reject(normalizeChromeRuntimeError(error));
+      }
+    });
   }
 
   function sendRuntimeMessage(message) {
+    if (!isExtensionContextAvailable()) {
+      return Promise.reject(makeExtensionContextInvalidatedError());
+    }
+
     return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage(message, (response) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
-        }
-        resolve(response);
-      });
+      try {
+        chrome.runtime.sendMessage(message, (response) => {
+          try {
+            const error = chrome.runtime.lastError;
+            if (error) {
+              reject(normalizeChromeRuntimeError(error));
+              return;
+            }
+            resolve(response);
+          } catch (error) {
+            reject(normalizeChromeRuntimeError(error));
+          }
+        });
+      } catch (error) {
+        reject(normalizeChromeRuntimeError(error));
+      }
     });
   }
 
   function updateTranslatedBadge(translated) {
-    chrome.runtime.sendMessage({
-      action: "setPageTranslatedBadge",
-      translated
-    }, () => {
-      void chrome.runtime.lastError;
-    });
+    if (!isExtensionContextAvailable()) {
+      markExtensionContextInvalidated();
+      return;
+    }
+
+    try {
+      chrome.runtime.sendMessage({
+        action: "setPageTranslatedBadge",
+        translated
+      }, () => {
+        try {
+          const error = chrome.runtime.lastError;
+          if (error && isExtensionContextInvalidatedError(error)) {
+            markExtensionContextInvalidated();
+          }
+        } catch (error) {
+          if (isExtensionContextInvalidatedError(error)) {
+            markExtensionContextInvalidated();
+          }
+        }
+      });
+    } catch (error) {
+      if (isExtensionContextInvalidatedError(error)) {
+        markExtensionContextInvalidated();
+      }
+    }
   }
 })();
