@@ -1,5 +1,5 @@
 (() => {
-  const CONTENT_SCRIPT_VERSION = "1.3.1";
+  const CONTENT_SCRIPT_VERSION = "1.3.2";
   if (window.__mlawDeepSeekTranslatorLoaded === CONTENT_SCRIPT_VERSION) {
     return;
   }
@@ -19,6 +19,7 @@
   const STYLE_ID = "mlaw-translate-style";
   const YOUTUBE_CAPTION_OVERLAY_ID = "mlaw-youtube-caption-overlay";
   const YOUTUBE_CAPTION_DEBOUNCE_MS = 350;
+  const DEFAULT_YOUTUBE_CAPTION_POSITION = { x: 50, y: 82 };
   const EXTENSION_CONTEXT_INVALIDATED_MESSAGE = "扩展已重新加载，请刷新当前页面后再试";
   const BASIC_SELECTOR = "p, li, h1, h2, h3, h4, h5, h6, blockquote, figcaption, td, th";
   const CANDIDATE_SELECTOR = `${BASIC_SELECTOR}, article, section`;
@@ -106,6 +107,7 @@
     youtubeCaptionRequestId: 0,
     youtubeCaptionHasTranslated: false,
     youtubeCaptionLastErrorAt: 0,
+    youtubeCaptionPosition: { ...DEFAULT_YOUTUBE_CAPTION_POSITION },
     lastUrl: location.href,
     extensionContextInvalidated: false
   };
@@ -166,7 +168,8 @@
       targetLanguage: DEFAULT_TARGET_LANGUAGE,
       siteRules: {},
       autoSourceLanguages: [],
-      youtubeCaptionsEnabled: false
+      youtubeCaptionsEnabled: false,
+      youtubeCaptionPosition: DEFAULT_YOUTUBE_CAPTION_POSITION
     });
 
     const siteKey = getSiteKey();
@@ -181,6 +184,7 @@
     );
     state.autoTranslate = state.siteAutoTranslate || state.autoTranslateBySource;
     state.youtubeCaptionsEnabled = Boolean(data.youtubeCaptionsEnabled);
+    state.youtubeCaptionPosition = normalizeYouTubeCaptionPosition(data.youtubeCaptionPosition);
   }
 
   async function handleMessage(request) {
@@ -1116,15 +1120,14 @@
       return;
     }
 
-    let overlay = document.getElementById(YOUTUBE_CAPTION_OVERLAY_ID);
+    const overlay = ensureYouTubeCaptionOverlay();
     if (!overlay) {
-      overlay = document.createElement("div");
-      overlay.id = YOUTUBE_CAPTION_OVERLAY_ID;
-      overlay.setAttribute("lang", state.targetLanguage);
-      document.documentElement.appendChild(overlay);
+      return;
     }
 
+    overlay.setAttribute("lang", state.targetLanguage);
     overlay.textContent = translation;
+    applyYouTubeCaptionPosition(overlay);
     overlay.style.display = "block";
   }
 
@@ -1134,6 +1137,146 @@
       overlay.textContent = "";
       overlay.style.display = "none";
     }
+  }
+
+  function ensureYouTubeCaptionOverlay() {
+    let overlay = document.getElementById(YOUTUBE_CAPTION_OVERLAY_ID);
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.id = YOUTUBE_CAPTION_OVERLAY_ID;
+      overlay.setAttribute("lang", state.targetLanguage);
+    }
+    attachYouTubeCaptionDragHandlers(overlay);
+
+    const host = getYouTubeCaptionHost();
+    if (!host) {
+      if (overlay.parentElement !== document.documentElement) {
+        document.documentElement.appendChild(overlay);
+      }
+      overlay.dataset.mlawDetached = "true";
+      return overlay;
+    }
+
+    overlay.dataset.mlawDetached = "false";
+    if (window.getComputedStyle(host).position === "static") {
+      host.style.position = "relative";
+    }
+
+    if (overlay.parentElement !== host) {
+      host.appendChild(overlay);
+    }
+
+    return overlay;
+  }
+
+  function getYouTubeCaptionHost() {
+    return document.querySelector("#movie_player, .html5-video-player");
+  }
+
+  function applyYouTubeCaptionPosition(overlay) {
+    const position = normalizeYouTubeCaptionPosition(state.youtubeCaptionPosition);
+    state.youtubeCaptionPosition = position;
+    overlay.style.left = `${position.x}%`;
+    overlay.style.top = `${position.y}%`;
+    overlay.style.bottom = "";
+    overlay.style.transform = "translate(-50%, -50%)";
+  }
+
+  function attachYouTubeCaptionDragHandlers(overlay) {
+    if (overlay.dataset.mlawDragReady === "true") {
+      return;
+    }
+
+    overlay.dataset.mlawDragReady = "true";
+    let dragging = false;
+
+    overlay.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) {
+        return;
+      }
+
+      const host = getYouTubeCaptionHost();
+      if (!host) {
+        return;
+      }
+
+      dragging = true;
+      overlay.setPointerCapture?.(event.pointerId);
+      overlay.classList.add("mlaw-youtube-caption-dragging");
+      event.preventDefault();
+    });
+
+    overlay.addEventListener("pointermove", (event) => {
+      if (!dragging) {
+        return;
+      }
+
+      const position = getYouTubeCaptionPositionFromPointer(event);
+      if (!position) {
+        return;
+      }
+
+      state.youtubeCaptionPosition = position;
+      applyYouTubeCaptionPosition(overlay);
+      event.preventDefault();
+    });
+
+    overlay.addEventListener("pointerup", (event) => {
+      if (!dragging) {
+        return;
+      }
+
+      dragging = false;
+      overlay.releasePointerCapture?.(event.pointerId);
+      overlay.classList.remove("mlaw-youtube-caption-dragging");
+      saveYouTubeCaptionPosition(state.youtubeCaptionPosition);
+      event.preventDefault();
+    });
+
+    overlay.addEventListener("pointercancel", (event) => {
+      dragging = false;
+      overlay.releasePointerCapture?.(event.pointerId);
+      overlay.classList.remove("mlaw-youtube-caption-dragging");
+    });
+  }
+
+  function getYouTubeCaptionPositionFromPointer(event) {
+    const host = getYouTubeCaptionHost();
+    if (!host) {
+      return null;
+    }
+
+    const rect = host.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+
+    return normalizeYouTubeCaptionPosition({
+      x: ((event.clientX - rect.left) / rect.width) * 100,
+      y: ((event.clientY - rect.top) / rect.height) * 100
+    });
+  }
+
+  function normalizeYouTubeCaptionPosition(value) {
+    const x = Number(value?.x);
+    const y = Number(value?.y);
+    return {
+      x: clampNumber(Number.isFinite(x) ? x : DEFAULT_YOUTUBE_CAPTION_POSITION.x, 8, 92),
+      y: clampNumber(Number.isFinite(y) ? y : DEFAULT_YOUTUBE_CAPTION_POSITION.y, 12, 90)
+    };
+  }
+
+  function clampNumber(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+
+  function saveYouTubeCaptionPosition(position) {
+    storageSyncSet({ youtubeCaptionPosition: normalizeYouTubeCaptionPosition(position) })
+      .catch((error) => {
+        if (isExtensionContextInvalidatedError(error)) {
+          markExtensionContextInvalidated();
+        }
+      });
   }
 
   function refreshTranslatedBadge() {
@@ -1194,13 +1337,13 @@
       }
 
       #${YOUTUBE_CAPTION_OVERLAY_ID} {
-        position: fixed;
+        position: absolute;
         z-index: 2147483646;
         left: 50%;
-        bottom: 7.5vh;
-        transform: translateX(-50%);
+        top: 82%;
+        transform: translate(-50%, -50%);
         display: none;
-        max-width: min(86vw, 980px);
+        max-width: min(86%, 980px);
         padding: 5px 10px;
         border-radius: 4px;
         background: rgba(0, 0, 0, 0.66);
@@ -1209,13 +1352,23 @@
         text-align: center;
         text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
         white-space: pre-wrap;
-        pointer-events: none;
+        cursor: move;
+        pointer-events: auto;
+        touch-action: none;
+        user-select: none;
+      }
+
+      #${YOUTUBE_CAPTION_OVERLAY_ID}[data-mlaw-detached="true"] {
+        position: fixed;
+      }
+
+      #${YOUTUBE_CAPTION_OVERLAY_ID}.mlaw-youtube-caption-dragging {
+        background: rgba(0, 0, 0, 0.78);
       }
 
       @media (max-width: 640px) {
         #${YOUTUBE_CAPTION_OVERLAY_ID} {
-          bottom: 10vh;
-          max-width: 92vw;
+          max-width: 92%;
           font-size: 16px;
         }
       }
@@ -1359,6 +1512,31 @@
               return;
             }
             resolve(result || {});
+          } catch (error) {
+            reject(normalizeChromeRuntimeError(error));
+          }
+        });
+      } catch (error) {
+        reject(normalizeChromeRuntimeError(error));
+      }
+    });
+  }
+
+  function storageSyncSet(values) {
+    if (!isExtensionContextAvailable()) {
+      return Promise.reject(makeExtensionContextInvalidatedError());
+    }
+
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.storage.sync.set(values, () => {
+          try {
+            const error = chrome.runtime.lastError;
+            if (error) {
+              reject(normalizeChromeRuntimeError(error));
+              return;
+            }
+            resolve();
           } catch (error) {
             reject(normalizeChromeRuntimeError(error));
           }
