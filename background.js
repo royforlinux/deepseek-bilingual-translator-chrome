@@ -2,7 +2,7 @@ const DEFAULT_TARGET_LANGUAGE = "zh-CN";
 const DEFAULT_ACTION_TITLE = "DeepSeek Translator";
 const DEEPSEEK_URL = "https://api.deepseek.com/chat/completions";
 const REQUEST_TIMEOUT_MS = 45000;
-const MAX_BATCH_BLOCKS = 20;
+const MAX_BATCH_BLOCKS = 8;
 const MAX_BATCH_CHARS = 4500;
 const TRANSLATION_BATCH_CONCURRENCY = 4;
 const TRANSLATION_CACHE_LIMIT = 1500;
@@ -360,8 +360,8 @@ async function translateBatchChunk(apiKey, blocks, targetLanguage) {
     content = await callDeepSeek(apiKey, prompt, 6000);
   } catch (error) {
     if (isDeepSeekContentRiskError(error)) {
-      console.warn("批量翻译内容被 DeepSeek 拒绝，降级为逐段翻译。");
-      return translateBlocksIndividually(apiKey, blocks, targetLanguage);
+      console.warn(`DeepSeek 风控拒绝了 ${blocks.length} 段内容，已跳过该批次。`);
+      return [];
     }
     throw error;
   }
@@ -392,18 +392,10 @@ async function translateBatchChunk(apiKey, blocks, targetLanguage) {
 async function translateBlocksIndividually(apiKey, blocks, targetLanguage) {
   const fallbackTranslations = [];
   for (const block of blocks) {
-    try {
-      fallbackTranslations.push({
-        id: block.id,
-        translation: await translateTextWithApiKey(apiKey, block.text, targetLanguage)
-      });
-    } catch (error) {
-      if (isDeepSeekContentRiskError(error)) {
-        console.warn("跳过 DeepSeek 拒绝的内容段：", block.id);
-        continue;
-      }
-      throw error;
-    }
+    fallbackTranslations.push({
+      id: block.id,
+      translation: await translateTextWithApiKey(apiKey, block.text, targetLanguage)
+    });
   }
   return fallbackTranslations;
 }
