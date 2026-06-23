@@ -1,5 +1,5 @@
 (() => {
-  const CONTENT_SCRIPT_VERSION = "1.3.2";
+  const CONTENT_SCRIPT_VERSION = "1.3.3";
   if (window.__mlawDeepSeekTranslatorLoaded === CONTENT_SCRIPT_VERSION) {
     return;
   }
@@ -1091,6 +1091,11 @@
       }
 
       if (!response?.success || !response.translation) {
+        if (isContentRiskMessage(response?.error)) {
+          state.youtubeCaptionLastTranslation = "";
+          hideYouTubeCaptionOverlay();
+          return;
+        }
         throw new Error(response?.error || "字幕翻译失败");
       }
 
@@ -1488,6 +1493,12 @@
       message.includes("Extension context invalidated") ||
       message.includes("Extension context was invalidated") ||
       message.includes(EXTENSION_CONTEXT_INVALIDATED_MESSAGE);
+  }
+
+  function isContentRiskMessage(message) {
+    const text = String(message || "");
+    return text.includes("DeepSeek 拒绝了该段内容") ||
+      text.includes("Content Exists Risk");
   }
 
   function normalizeChromeRuntimeError(error) {

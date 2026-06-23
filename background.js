@@ -6,6 +6,7 @@ const MAX_BATCH_BLOCKS = 20;
 const MAX_BATCH_CHARS = 4500;
 const TRANSLATION_BATCH_CONCURRENCY = 4;
 const TRANSLATION_CACHE_LIMIT = 1500;
+const DEEPSEEK_CONTENT_RISK_MESSAGE = "DeepSeek 拒绝了该段内容，已跳过";
 
 const LANGUAGES = [
   { id: "zh-CN", label: "简体中文" },
@@ -354,7 +355,16 @@ async function translateBatchChunk(apiKey, blocks, targetLanguage) {
     JSON.stringify(blocks.map(({ id, text }) => ({ id, text })))
   ].join("\n");
 
-  const content = await callDeepSeek(apiKey, prompt, 6000);
+  let content = "";
+  try {
+    content = await callDeepSeek(apiKey, prompt, 6000);
+  } catch (error) {
+    if (isDeepSeekContentRiskError(error)) {
+      console.warn("批量翻译内容被 DeepSeek 拒绝，降级为逐段翻译。");
+      return translateBlocksIndividually(apiKey, blocks, targetLanguage);
+    }
+    throw error;
+  }
 
   try {
     const parsed = parseJsonArray(content);
@@ -376,12 +386,24 @@ async function translateBatchChunk(apiKey, blocks, targetLanguage) {
     console.warn("批量 JSON 解析失败，降级为逐段翻译：", error);
   }
 
+  return translateBlocksIndividually(apiKey, blocks, targetLanguage);
+}
+
+async function translateBlocksIndividually(apiKey, blocks, targetLanguage) {
   const fallbackTranslations = [];
   for (const block of blocks) {
-    fallbackTranslations.push({
-      id: block.id,
-      translation: await translateTextWithApiKey(apiKey, block.text, targetLanguage)
-    });
+    try {
+      fallbackTranslations.push({
+        id: block.id,
+        translation: await translateTextWithApiKey(apiKey, block.text, targetLanguage)
+      });
+    } catch (error) {
+      if (isDeepSeekContentRiskError(error)) {
+        console.warn("跳过 DeepSeek 拒绝的内容段：", block.id);
+        continue;
+      }
+      throw error;
+    }
   }
   return fallbackTranslations;
 }
@@ -434,7 +456,7 @@ async function callDeepSeek(apiKey, prompt, maxTokens) {
 
     if (!response.ok) {
       const bodyText = await response.text().catch(() => "");
-      throw new Error(`DeepSeek 请求失败：HTTP ${response.status}${bodyText ? ` ${bodyText.slice(0, 180)}` : ""}`);
+      throw makeDeepSeekHttpError(response.status, bodyText);
     }
 
     const data = await response.json();
@@ -451,6 +473,28 @@ async function callDeepSeek(apiKey, prompt, maxTokens) {
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+function makeDeepSeekHttpError(status, bodyText) {
+  const message = `DeepSeek 请求失败：HTTP ${status}${bodyText ? ` ${bodyText.slice(0, 180)}` : ""}`;
+  const error = new Error(message);
+  error.status = status;
+  error.bodyText = bodyText || "";
+  if (isDeepSeekContentRiskResponse(status, bodyText)) {
+    error.name = "DeepSeekContentRiskError";
+  }
+  return error;
+}
+
+function isDeepSeekContentRiskResponse(status, bodyText) {
+  const text = String(bodyText || "");
+  return status === 400 &&
+    (text.includes("Content Exists Risk") || text.includes("invalid_request_error"));
+}
+
+function isDeepSeekContentRiskError(error) {
+  return error?.name === "DeepSeekContentRiskError" ||
+    isDeepSeekContentRiskResponse(error?.status, error?.bodyText || error?.message);
 }
 
 function normalizeBlocks(blocks) {
@@ -716,6 +760,9 @@ function isSupportedTabUrl(url) {
 function toUserMessage(error) {
   if (!error) {
     return "未知错误";
+  }
+  if (isDeepSeekContentRiskError(error)) {
+    return DEEPSEEK_CONTENT_RISK_MESSAGE;
   }
   if (typeof error === "string") {
     return error;
