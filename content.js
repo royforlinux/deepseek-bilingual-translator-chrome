@@ -1,5 +1,5 @@
 (() => {
-  const CONTENT_SCRIPT_VERSION = "1.3.3";
+  const CONTENT_SCRIPT_VERSION = "1.3.5";
   if (window.__mlawDeepSeekTranslatorLoaded === CONTENT_SCRIPT_VERSION) {
     return;
   }
@@ -766,21 +766,17 @@
     }
 
     copyComputedTextLayout(source, translatedNode, shouldNestInsideSource || isYouTubeTranslation);
+    applyTranslationFlowLayout(translatedNode, shouldNestInsideSource || isYouTubeTranslation);
     return translatedNode;
   }
 
   function buildTranslationClassName(source, isNested) {
     const classes = new Set();
-    if (!isYouTubeTextElement(source)) {
-      for (const className of source.classList || []) {
-        if (className !== TRANSLATED_CLASS) {
-          classes.add(className);
-        }
-      }
-    }
     classes.add(TRANSLATED_CLASS);
     if (isNested) {
       classes.add("mlaw-translated-inline-block");
+    } else {
+      classes.add("mlaw-translated-follow-block");
     }
     if (isYouTubeTextElement(source)) {
       classes.add("mlaw-youtube-translation");
@@ -848,6 +844,23 @@
     for (const property of spacingProperties) {
       target.style[property] = computed[property];
     }
+  }
+
+  function applyTranslationFlowLayout(target, isNested) {
+    target.style.setProperty("display", "block", "important");
+    target.style.setProperty("clear", "both", "important");
+    target.style.setProperty("white-space", "pre-wrap", "important");
+
+    if (isNested) {
+      target.style.setProperty("margin-top", "0.35em", "important");
+      target.style.setProperty("margin-bottom", "0", "important");
+      target.style.setProperty("padding", "0", "important");
+      return;
+    }
+
+    target.style.setProperty("width", "100%", "important");
+    target.style.setProperty("margin-top", "0.35em", "important");
+    target.style.setProperty("margin-bottom", "0.85em", "important");
   }
 
   function restorePage(options = {}) {
@@ -1324,20 +1337,34 @@
     style.id = STYLE_ID;
     style.textContent = `
       .${TRANSLATED_CLASS} {
-        box-sizing: border-box;
-        border: 0;
-        background: transparent;
+        box-sizing: border-box !important;
+        display: block !important;
+        clear: both !important;
+        border: 0 !important;
+        background: transparent !important;
         color: inherit;
-        white-space: pre-wrap;
+        white-space: pre-wrap !important;
+        overflow-wrap: anywhere;
       }
 
       .${TRANSLATED_CLASS}.mlaw-translated-inline-block {
-        display: block;
+        display: block !important;
+        margin-top: 0.35em !important;
+        margin-bottom: 0 !important;
+        opacity: 0.88;
+      }
+
+      .${TRANSLATED_CLASS}.mlaw-translated-follow-block {
+        display: block !important;
+        width: 100% !important;
+        margin-top: 0.35em !important;
+        margin-bottom: 0.85em !important;
+        opacity: 0.88;
       }
 
       .${TRANSLATED_CLASS}.mlaw-youtube-translation {
-        display: block;
-        margin-top: 0.35em;
+        display: block !important;
+        margin-top: 0.35em !important;
         opacity: 0.88;
       }
 
